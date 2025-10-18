@@ -107,22 +107,15 @@ func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.Handler
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		// オリジンが空の場合は拒否（直接APIを叩いている可能性）
-		if origin == "" {
-			http.Error(w, "Origin header required", http.StatusForbidden)
-			return
+		// オリジンが許可リストに含まれているかチェック
+		if isOriginAllowed(origin, allowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
-		// 許可リストチェック
-		if !isOriginAllowed(origin, allowedOrigins) {
-			http.Error(w, "Origin not allowed", http.StatusForbidden)
-			return
-		}
-
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "3600") // プリフライトキャッシュ
+		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
