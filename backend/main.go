@@ -16,6 +16,7 @@ import (
 type RankRequest struct {
 	GameName string `json:"gameName"`
 	TagLine  string `json:"tagLine"`
+	Region   string `json:"region"`
 }
 
 type RankResponse struct {
@@ -71,22 +72,12 @@ func main() {
 // 許可するオリジンを取得
 func getAllowedOrigins() []string {
 	originsEnv := os.Getenv("ALLOWED_ORIGINS")
-	log.Printf("DEBUG: ALLOWED_ORIGINS env var: '%s'\n", originsEnv)
-
 	if originsEnv == "" {
 		// デフォルト値（開発環境用）
-		log.Println("WARNING: ALLOWED_ORIGINS not set, using defaults")
 		return []string{"http://localhost:5173", "http://localhost:3000"}
 	}
-
-	// カンマ区切りで複数指定可能、前後の空白を削除
-	origins := strings.Split(originsEnv, ",")
-	for i := range origins {
-		origins[i] = strings.TrimSpace(origins[i])
-	}
-
-	log.Printf("INFO: Parsed allowed origins: %v\n", origins)
-	return origins
+	// カンマ区切りで複数指定可能
+	return strings.Split(originsEnv, ",")
 }
 
 // CORS設定を修正
@@ -117,36 +108,25 @@ func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.Handler
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		log.Printf("DEBUG: Request method: %s, Origin: %s\n", r.Method, origin)
-		log.Printf("DEBUG: Allowed origins: %v\n", allowedOrigins)
-
-		// オリジンが空でも、許可リストにあれば処理を続ける
-		allowed := isOriginAllowed(origin, allowedOrigins)
-
-		// CORSヘッダーを常に設定（preflightにも必要）
-		if allowed && origin != "" {
-			log.Printf("DEBUG: Setting CORS headers for origin: %s\n", origin)
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		} else if origin != "" {
-			log.Printf("WARNING: Origin not allowed: %s\n", origin)
-		}
-
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "3600")
-
-		// OPTIONSリクエスト（preflight）の場合はここで終了
-		if r.Method == "OPTIONS" {
-			log.Printf("DEBUG: Handling OPTIONS preflight request\n")
-			w.WriteHeader(http.StatusOK)
+		// オリジンが空の場合は拒否（直接APIを叩いている可能性）
+		if origin == "" {
+			http.Error(w, "Origin header required", http.StatusForbidden)
 			return
 		}
 
-		// 許可されていないオリジンからのリクエストは拒否
-		if origin != "" && !allowed {
-			log.Printf("ERROR: Blocking request from unauthorized origin: %s\n", origin)
+		// 許可リストチェック
+		if !isOriginAllowed(origin, allowedOrigins) {
 			http.Error(w, "Origin not allowed", http.StatusForbidden)
+			return
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "3600") // プリフライトキャッシュ
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
@@ -187,7 +167,6 @@ func getRankHandler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("INFO: Received request - GameName: %s, TagLine: %s\n", req.GameName, req.TagLine)
 
-	regions := []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
 	continents := map[string]string{
 		"jp1":  "asia",
 		"kr":   "asia",
@@ -206,6 +185,21 @@ func getRankHandler(w http.ResponseWriter, r *http.Request) {
 	var lastError error
 	var summonerInfo *riotapi.Summoner
 
+	var regions []string
+	if req.Region != "" {
+		// 指定されたリージョンを最初に試す
+		regions = []string{req.Region}
+		// 他のリージョンも追加（フォールバック用）
+		allRegions := []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
+		for _, r := range allRegions {
+			if r != req.Region {
+				regions = append(regions, r)
+			}
+		}
+	} else {
+		// リージョン指定がない場合は従来通り
+		regions = []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
+	}
 	for _, region := range regions {
 		continent := continents[region]
 		fmt.Printf("INFO: Trying region %s (continent: %s)\n", region, continent)
