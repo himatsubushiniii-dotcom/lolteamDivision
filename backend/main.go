@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -16,7 +17,6 @@ import (
 type RankRequest struct {
 	GameName string `json:"gameName"`
 	TagLine  string `json:"tagLine"`
-	Region   string `json:"region"`
 }
 
 type RankResponse struct {
@@ -33,13 +33,17 @@ type RoleMMRRequest struct {
 	MatchCount int    `json:"matchCount"`
 }
 
+var (
+	riotAPIKey   string
+	globalClient *riotapi.Client
+	clientMutex  sync.Mutex
+)
+
 func main() {
-	// .envファイルを読み込む（存在しない場合はスキップ）
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not found, using environment variables")
 	}
 
-	// 環境変数からAPIキーを取得
 	apiKey := os.Getenv("RIOT_API_KEY")
 	if apiKey == "" {
 		log.Fatal("ERROR: RIOT_API_KEY environment variable is not set")
@@ -47,16 +51,17 @@ func main() {
 
 	log.Printf("INFO: Server starting with API key: %s...\n", apiKey[:10]+"***")
 
-	// APIキーをグローバル変数に設定（後で使用するため）
 	riotAPIKey = apiKey
-	// グローバルクライアントを初期化（キャッシュとレート制限を共有）
 	globalClient = riotapi.NewClient(apiKey, "jp1", "asia")
 
-	// 環境変数から許可するオリジンを取得
 	allowedOrigins := getAllowedOrigins()
+
+	// 通常のエンドポイント（CORS制限あり）
 	http.HandleFunc("/api/rank", corsMiddleware(getRankHandler, allowedOrigins))
 	http.HandleFunc("/api/role-mmr", corsMiddleware(getRoleMMRHandler, allowedOrigins))
-	http.HandleFunc("/api/rate-limit-stats", corsMiddleware(getRateLimitStatsHandler, allowedOrigins))
+
+	// ヘルスチェック用エンドポイント（CORS制限なし - Cron Job用）
+	http.HandleFunc("/api/health", healthCheckHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -69,52 +74,38 @@ func main() {
 	}
 }
 
-// 許可するオリジンを取得
+// ヘルスチェック用エンドポイント（CORS制限なし）
+func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// 簡単なレスポンス
+	response := map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now().Unix(),
+		"service":   "lol-team-backend",
+	}
+
+	json.NewEncoder(w).Encode(response)
+	log.Println("INFO: Health check accessed")
+}
+
 func getAllowedOrigins() []string {
 	originsEnv := os.Getenv("ALLOWED_ORIGINS")
 	if originsEnv == "" {
-		// デフォルト値（開発環境用）
 		return []string{"http://localhost:5173", "http://localhost:3000"}
 	}
-	// カンマ区切りで複数指定可能
 	return strings.Split(originsEnv, ",")
 }
 
-// CORS設定を修正
-// func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.HandlerFunc {
-// 	return func(w http.ResponseWriter, r *http.Request) {
-// 		origin := r.Header.Get("Origin")
-
-// 		// オリジンが許可リストに含まれているかチェック
-// 		if isOriginAllowed(origin, allowedOrigins) {
-// 			w.Header().Set("Access-Control-Allow-Origin", origin)
-// 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-// 		}
-
-// 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-// 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-// 		if r.Method == "OPTIONS" {
-// 			w.WriteHeader(http.StatusOK)
-// 			return
-// 		}
-
-// 		next(w, r)
-// 	}
-// }
-
-// 本番の場合下記をコメントアウトを解除する
 func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		// オリジンが空の場合は拒否（直接APIを叩いている可能性）
 		if origin == "" {
 			http.Error(w, "Origin header required", http.StatusForbidden)
 			return
 		}
 
-		// 許可リストチェック
 		if !isOriginAllowed(origin, allowedOrigins) {
 			http.Error(w, "Origin not allowed", http.StatusForbidden)
 			return
@@ -123,7 +114,7 @@ func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.Handler
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "3600") // プリフライトキャッシュ
+		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -134,7 +125,6 @@ func corsMiddleware(next http.HandlerFunc, allowedOrigins []string) http.Handler
 	}
 }
 
-// オリジンが許可されているかチェック
 func isOriginAllowed(origin string, allowedOrigins []string) bool {
 	for _, allowed := range allowedOrigins {
 		if origin == allowed {
@@ -144,14 +134,6 @@ func isOriginAllowed(origin string, allowedOrigins []string) bool {
 	return false
 }
 
-// グローバル変数としてAPIキーを保持
-var (
-	riotAPIKey   string
-	globalClient *riotapi.Client
-	clientMutex  sync.Mutex
-)
-
-// getRankHandler を修正（既存の関数を置き換え）
 func getRankHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -167,6 +149,7 @@ func getRankHandler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("INFO: Received request - GameName: %s, TagLine: %s\n", req.GameName, req.TagLine)
 
+	regions := []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
 	continents := map[string]string{
 		"jp1":  "asia",
 		"kr":   "asia",
@@ -185,26 +168,10 @@ func getRankHandler(w http.ResponseWriter, r *http.Request) {
 	var lastError error
 	var summonerInfo *riotapi.Summoner
 
-	var regions []string
-	if req.Region != "" {
-		// 指定されたリージョンを最初に試す
-		regions = []string{req.Region}
-		// 他のリージョンも追加（フォールバック用）
-		allRegions := []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
-		for _, r := range allRegions {
-			if r != req.Region {
-				regions = append(regions, r)
-			}
-		}
-	} else {
-		// リージョン指定がない場合は従来通り
-		regions = []string{"jp1", "kr", "na1", "euw1", "eun1", "br1", "la1", "la2", "oc1", "tr1", "ru"}
-	}
 	for _, region := range regions {
 		continent := continents[region]
 		fmt.Printf("INFO: Trying region %s (continent: %s)\n", region, continent)
 
-		// グローバルクライアントを使用（キャッシュとレート制限を共有）⬅️ 修正
 		clientMutex.Lock()
 		globalClient.RegionalURL = fmt.Sprintf("https://%s.api.riotgames.com", region)
 		globalClient.GlobalURL = fmt.Sprintf("https://%s.api.riotgames.com", continent)
@@ -284,7 +251,6 @@ func getRankHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(rankInfo)
 }
 
-// レート制限状態を確認するエンドポイントを追加
 func getRateLimitStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
